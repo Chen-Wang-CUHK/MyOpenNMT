@@ -177,6 +177,9 @@ class LuaBiRNNEncoder(EncoderBase):
 
     def forward(self, input, lengths=None, hidden=None):
         """train fw and bw separately and then concatenate"""
+        if isinstance(input, tuple):
+            input = input[0]
+            lengths = lengths[0]
         self._check_args(input, lengths, hidden)
 
         def reverse(seq_data_input, lengths):
@@ -298,6 +301,9 @@ class PyBiRNNEncoder(EncoderBase):
 
     def forward(self, input, lengths=None, hidden=None):
         """Embedding->BiRNN1->Dropout->BiRNN2"""
+        if isinstance(input, tuple):
+            input = input[0]
+            lengths = lengths[0]
         self._check_args(input, lengths, hidden)
 
         emb = self.embeddings(input)
@@ -377,6 +383,9 @@ class PyBiRNNEncoder2(EncoderBase):
         Extract the answer output and Gating for both BiRNN-layer's output
         Also gate for the final state
         """
+        if isinstance(input, tuple):
+            input = input[0]
+            lengths = lengths[0]
         self._check_args(input, lengths, hidden)
 
         def get_ans_posi(is_ans_feature):
