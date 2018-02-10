@@ -1,8 +1,16 @@
-- preprocess (need set the correct file path):
+- preprocess json file into .txt file:
 ```
 chmod +x sh/*.sh
 ./sh/JsonFilePreprocess.sh
+```
+- extract answer into another .txt file:
+```
+chmod +x sh/*.sh
 ./sh/process_utils.sh
+```
+- preprocess .txt file, combine into .pt file and build vocabs:
+```
+chmod +x sh/*.sh
 ./sh/preprocess.sh
 ```
 - use glove embedding:
