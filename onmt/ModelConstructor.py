@@ -9,8 +9,11 @@ import onmt
 import onmt.io
 import onmt.Models
 import onmt.modules
-from onmt.Models import NMTModel, SelEncNMTModel, MeanEncoder, RNNEncoder, PyBiRNNEncoder2, \
-                        StdRNNDecoder, InputFeedRNNDecoder, LuaBiRNNEncoder, PyBiRNNEncoder, PyBiRNNEncoder3
+from onmt.Models import NMTModel, SelEncNMTModel, MeanEncoder, RNNEncoder, \
+                        StdRNNDecoder, InputFeedRNNDecoder, \
+                        LuaBiRNNEncoder, \
+                        PyBiRNNEncoder, PyBiRNNEncoder2, PyBiRNNEncoder3, \
+                        MatchRNNEncoder
 from onmt.modules import Embeddings, ImageEncoder, CopyGenerator, \
                          TransformerEncoder, TransformerDecoder, \
                          CNNEncoder, CNNDecoder, AudioEncoder
@@ -73,7 +76,9 @@ def make_encoder(opt, embeddings):
         #                   opt.rnn_size, opt.dropout, embeddings)
         # return LuaBiRNNEncoder(opt.rnn_type, opt.enc_layers, opt.rnn_size,
         #                        opt.dropout, embeddings)
-        return PyBiRNNEncoder3(opt.rnn_type, opt.brnn, opt.enc_layers,
+        # return PyBiRNNEncoder3(opt.rnn_type, opt.brnn, opt.enc_layers,
+        #                        opt.rnn_size, opt.dropout, embeddings)
+        return MatchRNNEncoder(opt.rnn_type, opt.brnn, opt.enc_layers,
                                opt.rnn_size, opt.dropout, embeddings)
 
 

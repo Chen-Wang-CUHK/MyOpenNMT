@@ -515,15 +515,15 @@ class PyBiRNNEncoder3(EncoderBase):
             hidden_size=hidden_size,
             num_layers=1,
             bidirectional=self.bidirectional)
-        self.fc1 = nn.Linear(4 * hidden_size, 2 * hidden_size)
+        # self.fc1 = nn.Linear(4 * hidden_size, 2 * hidden_size)
         # self.fc2 = nn.Linear(4 * hidden_size, 2 * hidden_size)
-        self.sigmoid = nn.Sigmoid()
+        # self.sigmoid = nn.Sigmoid()
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, input, lengths=None, hidden=None):
         """
         a reading comprehension style framework for encoder
-        (src->BiRNN1, ans->BiRNN3->average)->gated output -> BiRNN2->Decoder
+        (src->BiRNN1->Dropout, ans->BiRNN3->average)->gated output -> BiRNN2->Decoder
         """
         assert isinstance(input, tuple)
         assert isinstance(lengths, tuple)
@@ -533,24 +533,23 @@ class PyBiRNNEncoder3(EncoderBase):
         ans_mask = (ans_input[:, :, 0] != 1).float()
         extend_ans_mask = ans_mask.unsqueeze(2)
         src_lengths, ans_lengths = lengths
+
         self._check_args(src_input, src_lengths, hidden)
         self._check_args(ans_input, ans_lengths, hidden)
 
         src_emb = self.embeddings(src_input)    # [src_seq_len, batch_size, emb_dim]
-        src_lengths = src_lengths.view(-1).tolist()
         s_len, batch, emb_dim = src_emb.size()
 
         ans_emb = self.embeddings(ans_input)  # [ans_seq_len, batch_size, emb_dim]
-        ans_lengths = ans_lengths.view(-1).tolist()
         ans_len, batch, emb_dim = ans_emb.size()
 
         packed_emb = src_emb
         if src_lengths is not None and not self.no_pack_padded_seq:
             # Lengths data is wrapped inside a Variable.
-            packed_emb = pack(src_emb, src_lengths)
+            packed_emb = pack(src_emb, src_lengths.view(-1).tolist())
         # forward
         src_outputs1, src_hidden_t1 = self.bi_rnn1(packed_emb, hidden)
-        if lengths is not None and not self.no_pack_padded_seq:
+        if src_lengths is not None and not self.no_pack_padded_seq:
             # output1
             src_outputs1 = unpack(src_outputs1)[0]
 
@@ -558,30 +557,227 @@ class PyBiRNNEncoder3(EncoderBase):
         src_outputs1 = self.dropout(src_outputs1)
 
         # answer encoding
-        # the final hidden state is incorrect because without considering various lengths of sequence
-        ans_outputs, _ = self.ans_bi_rnn(ans_emb, hidden)
-        ans_outputs = ans_outputs * extend_ans_mask #[ans_len, batch, 2*hidden_size]
-        mean_ans_output = torch.mean(ans_outputs, dim=0)    #[batch, 2*hidden_size]
-        mean_ans_output = mean_ans_output.unsqueeze(0).expand(src_outputs1.size())  #[src_len, batch, 2*hidden_size]
+        # # 1. _forward_unpadded
+        # # the final hidden state is incorrect because without considering various lengths of sequence
+        # ans_outputs, _ = self.ans_bi_rnn(ans_emb, hidden)
+        # ans_outputs = ans_outputs * extend_ans_mask  # [ans_len, batch, 2*hidden_size]
+        #
+        # 2. _forward_padded
+        sorted_ans_lengths, idx_sort = torch.sort(ans_lengths, dim=0, descending=True)
+        _, idx_unsort = torch.sort(idx_sort, dim=0)
 
-        # calculate the output gate for src_outputs1
-        gate_src_outs1 = self.fc1(torch.cat([src_outputs1, mean_ans_output], dim=2))
+        idx_sort = Variable(idx_sort)   # [batch_size]
+        idx_unsort = Variable(idx_unsort)   # [batch_size]
+        # sort the answer w.r.t length
+        ans_emb = ans_emb.index_select(1, idx_sort)
 
-        src_outputs1 *= gate_src_outs1
+        packed_ans_emb = ans_emb
+        if sorted_ans_lengths is not None and not self.no_pack_padded_seq:
+            packed_ans_emb = pack(packed_ans_emb, sorted_ans_lengths.view(-1).tolist())
+        # forward
+        ans_outputs, ans_hidden = self.ans_bi_rnn(packed_ans_emb, hidden)
+        if sorted_ans_lengths is not None and not self.no_pack_padded_seq:
+            ans_outputs = unpack(ans_outputs)[0]
+            ans_outputs = ans_outputs.index_select(1, idx_unsort)
+            # h, c
+            ans_hidden = tuple([ans_hidden[i].index_select(1, idx_unsort) for i in range(2)])
+
+        # ----get gate----
+        # mean_ans_output = torch.mean(ans_outputs, dim=0)    #[batch, 2*hidden_size]
+        # mean_ans_output = mean_ans_output.unsqueeze(0).expand(src_outputs1.size())  #[src_len, batch, 2*hidden_size]
+        #
+        # # calculate the output gate for src_outputs1
+        # gate_src_outs1 = self.sigmoid(self.fc1(torch.cat([src_outputs1, mean_ans_output], dim=2)))
+        # src_outputs1 *= gate_src_outs1
 
         packed_input2 = src_outputs1
-        if lengths is not None and not self.no_pack_padded_seq:
+        if src_lengths is not None and not self.no_pack_padded_seq:
             # Lengths data is wrapped inside a Variable.
-            packed_input2 = pack(src_outputs1, src_lengths)
+            packed_input2 = pack(src_outputs1, src_lengths.view(-1).tolist())
         # forward
         src_outputs2, src_hidden_t2 = self.bi_rnn2(packed_input2, hidden)
-        if lengths is not None and not self.no_pack_padded_seq:
+        if src_lengths is not None and not self.no_pack_padded_seq:
             # output2
             src_outputs2 = unpack(src_outputs2)[0]
 
+        # calculate the output gate for src_outputs2
+        # gate_src_outs2 = self.sigmoid(self.fc2(torch.cat([src_outputs2, mean_ans_output], dim=2)))
+        # src_outputs2 *= gate_src_outs2
+
         hidden_t = []
-        hidden_t.append(torch.cat([src_hidden_t2[0], src_hidden_t2[0].clone()], dim=0))
-        hidden_t.append(torch.cat([src_hidden_t2[1], src_hidden_t2[1].clone()], dim=0))
+        # hidden_t.append(torch.cat([src_hidden_t1[0], src_hidden_t2[0]], dim=0))
+        # hidden_t.append(torch.cat([src_hidden_t1[1], src_hidden_t2[1]], dim=0))
+        hidden_t.append(torch.cat([ans_hidden[0], ans_hidden[0].clone()], dim=0))
+        hidden_t.append(torch.cat([ans_hidden[1], ans_hidden[1].clone()], dim=0))
+        hidden_t = tuple(hidden_t)
+
+        return hidden_t, src_outputs2
+
+
+class MatchRNNEncoder(EncoderBase):
+    """
+    Match Bi-directional RNN, Reading Comprehension like RNN encoder
+    (src -> BiRNN1, ans -> BiRNN3) -> match layer -> BiRNN2->Decoder
+    """
+
+    def __init__(self, rnn_type, bidirectional, num_layers, hidden_size,
+                 dropout, embeddings):
+        super(MatchRNNEncoder, self).__init__()
+
+        assert rnn_type == "LSTM"
+        assert bidirectional
+        assert num_layers == 2
+
+        hidden_size = hidden_size // 2
+        self.real_hidden_size = hidden_size
+        self.no_pack_padded_seq = False
+        self.bidirectional = bidirectional
+
+        self.embeddings = embeddings
+        self.bi_rnn1 = getattr(nn, rnn_type)(  # getattr(nn, rnn_type) = torch.nn.modules.rnn.LSTM
+            input_size=embeddings.embedding_size,
+            hidden_size=hidden_size,
+            num_layers=1,
+            bidirectional=self.bidirectional)
+        self.bi_rnn2 = getattr(nn, rnn_type)(  # getattr(nn, rnn_type) = torch.nn.modules.rnn.LSTM
+            input_size=2 * hidden_size,
+            hidden_size=hidden_size,
+            num_layers=1,
+            bidirectional=self.bidirectional)
+        self.ans_bi_rnn = getattr(nn, rnn_type)(  # getattr(nn, rnn_type) = torch.nn.modules.rnn.LSTM
+            input_size=embeddings.embedding_size,
+            hidden_size=hidden_size,
+            num_layers=1,
+            bidirectional=self.bidirectional)
+        self.fc1 = nn.Linear(4 * hidden_size, 2 * hidden_size)
+        # self.fc2 = nn.Linear(4 * hidden_size, 2 * hidden_size)
+        self.sigmoid = nn.Sigmoid()
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, input, lengths=None, hidden=None):
+        """
+        a reading comprehension style framework for encoder
+        (src->BiRNN1->Dropout, ans->BiRNN3->average)->gated output -> BiRNN2->Decoder
+        """
+        assert isinstance(input, tuple)
+        assert isinstance(lengths, tuple)
+        src_input, ans_input = input
+        # Bad code, need to know the vocab idx of <blank>
+        src_mask = (src_input[:, :, 0] != 1).float()    # [seq_len, batch]
+        ans_mask = (ans_input[:, :, 0] != 1).float()    # [seq_len, batch]
+        # extend_ans_mask = ans_mask.unsqueeze(2)
+        src_lengths, ans_lengths = lengths
+
+        self._check_args(src_input, src_lengths, hidden)
+        self._check_args(ans_input, ans_lengths, hidden)
+
+        src_emb = self.embeddings(src_input)    # [src_seq_len, batch_size, emb_dim]
+        s_len, batch, emb_dim = src_emb.size()
+
+        ans_emb = self.embeddings(ans_input)  # [ans_seq_len, batch_size, emb_dim]
+        ans_len, batch, emb_dim = ans_emb.size()
+
+        packed_emb = src_emb
+        if src_lengths is not None and not self.no_pack_padded_seq:
+            # Lengths data is wrapped inside a Variable.
+            packed_emb = pack(src_emb, src_lengths.view(-1).tolist())
+        # forward
+        src_outputs1, src_hidden_t1 = self.bi_rnn1(packed_emb, hidden)
+        if src_lengths is not None and not self.no_pack_padded_seq:
+            # output1
+            src_outputs1 = unpack(src_outputs1)[0]
+
+        # former dropout
+        src_outputs1 = self.dropout(src_outputs1)
+
+        # answer encoding
+        # # 1. _forward_unpadded
+        # # the final hidden state is incorrect because without considering various lengths of sequence
+        # ans_outputs, _ = self.ans_bi_rnn(ans_emb, hidden)
+        # ans_outputs = ans_outputs * extend_ans_mask  # [ans_len, batch, 2*hidden_size]
+        #
+        # 2. _forward_padded
+        sorted_ans_lengths, idx_sort = torch.sort(ans_lengths, dim=0, descending=True)
+        _, idx_unsort = torch.sort(idx_sort, dim=0)
+
+        idx_sort = Variable(idx_sort)   # [batch_size]
+        idx_unsort = Variable(idx_unsort)   # [batch_size]
+        # sort the answer w.r.t length
+        ans_emb = ans_emb.index_select(1, idx_sort)
+
+        packed_ans_emb = ans_emb
+        if sorted_ans_lengths is not None and not self.no_pack_padded_seq:
+            packed_ans_emb = pack(packed_ans_emb, sorted_ans_lengths.view(-1).tolist())
+        # forward
+        ans_outputs, ans_hidden = self.ans_bi_rnn(packed_ans_emb, hidden)
+        if sorted_ans_lengths is not None and not self.no_pack_padded_seq:
+            ans_outputs = unpack(ans_outputs)[0]
+            ans_outputs = ans_outputs.index_select(1, idx_unsort)
+            # h, c
+            ans_hidden = tuple([ans_hidden[i].index_select(1, idx_unsort) for i in range(2)])
+
+        # ----get gate----
+        # mean_ans_output = torch.mean(ans_outputs, dim=0)    #[batch, 2*hidden_size]
+        # mean_ans_output = mean_ans_output.unsqueeze(0).expand(src_outputs1.size())  #[src_len, batch, 2*hidden_size]
+        #
+        # # calculate the output gate for src_outputs1
+        # gate_src_outs1 = self.sigmoid(self.fc1(torch.cat([src_outputs1, mean_ans_output], dim=2)))
+        # src_outputs1 *= gate_src_outs1
+
+        # match layer
+        import torch.nn.functional as F
+        BF_src_mask = src_mask.transpose(0, 1)  # [batch, src_seq_len]
+        BF_ans_mask = ans_mask.transpose(0, 1)  # [batch, ans_seq_len]
+        BF_src_outputs1 = src_outputs1.transpose(0, 1)  # [batch, src_seq_len, 2*hidden_size]
+        BF_ans_outputs = ans_outputs.transpose(0, 1)  # [batch, ans_seq_len, 2*hidden_size]
+
+        # compute scores
+        scores = BF_src_outputs1.bmm(BF_ans_outputs.transpose(2, 1))    # [batch, src_seq_len, ans_seq_len]
+
+        # mask padding
+        Expand_BF_ans_mask = BF_ans_mask.unsqueeze(1).expand(scores.size())
+        scores.data.masked_fill_((1 - Expand_BF_ans_mask).data.byte(), -float('inf'))
+
+        # normalize with softmax
+        alpha = F.softmax(scores, dim=2)    # [batch, src_seq_len, ans_seq_len]
+
+        # take the weighted average
+        BF_matched_seq = alpha.bmm(BF_ans_outputs) # [batch, src_seq_len, 2*hidden_size]
+        matched_seq = BF_matched_seq.transpose(0, 1)    # [src_seq_len, batch, 2*hidden_size]
+
+        # ----get gate----
+        # # calculate the output gate for src_outputs1
+        gate_src_outs1 = self.sigmoid(self.fc1(torch.cat([src_outputs1, matched_seq], dim=2)))
+        gated_src_outputs1 = gate_src_outs1 * src_outputs1
+
+
+        # merge the gated information
+        # src_outputs1 = torch.cat([src_outputs1, gated_src_outputs1], dim=-1)
+        # src_outputs1 = src_outputs1 + gated_src_outputs1
+        src_outputs1 = gated_src_outputs1
+
+        # later dropout
+        # src_outputs1 = self.dropout(src_outputs1)
+
+        packed_input2 = src_outputs1
+        if src_lengths is not None and not self.no_pack_padded_seq:
+            # Lengths data is wrapped inside a Variable.
+            packed_input2 = pack(src_outputs1, src_lengths.view(-1).tolist())
+        # forward
+        src_outputs2, src_hidden_t2 = self.bi_rnn2(packed_input2, hidden)
+        if src_lengths is not None and not self.no_pack_padded_seq:
+            # output2
+            src_outputs2 = unpack(src_outputs2)[0]
+
+        # calculate the output gate for src_outputs2
+        # gate_src_outs2 = self.fc2(torch.cat([src_outputs2, mean_ans_output], dim=2))
+        # src_outputs2 *= gate_src_outs2
+
+        hidden_t = []
+        hidden_t.append(torch.cat([src_hidden_t1[0], src_hidden_t2[0]], dim=0) * 0)
+        hidden_t.append(torch.cat([src_hidden_t1[1], src_hidden_t2[1]], dim=0) * 0)
+        # hidden_t.append(torch.cat([ans_hidden[0], ans_hidden[0].clone()], dim=0))
+        # hidden_t.append(torch.cat([ans_hidden[1], ans_hidden[1].clone()], dim=0))
         hidden_t = tuple(hidden_t)
 
         return hidden_t, src_outputs2
